@@ -6,7 +6,17 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/uaccess.h>
 
+#include <linux/kobject.h>
+#include <linux/ktime.h>
+#include <linux/sysfs.h>
+
+#include "fib.h"
+#include "fibkobj.h"
+
+MODULE_SOFTDEP("pre: fibkm");
+MODULE_SOFTDEP("pre: fibkobj");
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("National Cheng Kung University, Taiwan");
 MODULE_DESCRIPTION("Fibonacci engine driver");
@@ -14,30 +24,10 @@ MODULE_VERSION("0.1");
 
 #define DEV_FIBONACCI_NAME "fibonacci"
 
-/* MAX_LENGTH is set to 92 because
- * ssize_t can't fit the number > 92
- */
-#define MAX_LENGTH 92
-
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
-
-static long long fib_sequence(long long k)
-{
-    /* FIXME: use clz/ctz and fast algorithms to speed up */
-    long long f[k + 2];
-
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
-    }
-
-    return f[k];
-}
 
 static int fib_open(struct inode *inode, struct file *file)
 {
@@ -54,13 +44,47 @@ static int fib_release(struct inode *inode, struct file *file)
     return 0;
 }
 
+static fib_256_f fib = &fib_doubling_256_clz;
+
+void update_function(char type)
+{
+    switch (type) {
+    case 'd':  // doubling
+        fib = &fib_doubling_128_proxy;
+        break;
+    case 's':  // sequence
+        fib = &fib_sequence_128_proxy;
+        break;
+    case 'z':  // doubling clz
+        fib = &fib_doubling_128_clz_proxy;
+        break;
+    case 'S':  // sequence
+        fib = &fib_iterative_256;
+        break;
+    case 'Z':  // doubling clz
+        fib = &fib_doubling_256_clz;
+        break;
+    default:
+        fib = &fib_doubling_256_clz;
+        break;
+    }
+}
+
 /* calculate the fibonacci number at given offset */
 static ssize_t fib_read(struct file *file,
                         char *buf,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    ktime_t kt = ktime_get();
+    u256 value = {.low = 0, .high = 0};
+    fib(&value, *offset);
+    kt = ktime_sub(ktime_get(), kt);
+    if (copy_to_user(buf, &value, INT256_SIZE)) {
+        return 0;
+    } else {
+        return ktime_to_ns(kt);
+    }
 }
 
 /* write operation is skipped */
@@ -69,7 +93,8 @@ static ssize_t fib_write(struct file *file,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    // kernel to user time
+    return ktime_to_ns(ktime_get());
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
@@ -110,6 +135,8 @@ static int __init init_fib_dev(void)
 
     mutex_init(&fib_mutex);
 
+    notify_fibonacci_type_callback(update_function);
+
     // Let's register the device
     // This will dynamically allocate the major number
     rc = alloc_chrdev_region(&fib_dev, 0, 1, DEV_FIBONACCI_NAME);
@@ -127,6 +154,7 @@ static int __init init_fib_dev(void)
         rc = -1;
         goto failed_cdev;
     }
+
     fib_cdev->ops = &fib_fops;
     rc = cdev_add(fib_cdev, fib_dev, 1);
 
@@ -149,6 +177,7 @@ static int __init init_fib_dev(void)
         rc = -4;
         goto failed_device_create;
     }
+
     return rc;
 failed_device_create:
     class_destroy(fib_class);
@@ -166,6 +195,7 @@ static void __exit exit_fib_dev(void)
     class_destroy(fib_class);
     cdev_del(fib_cdev);
     unregister_chrdev_region(fib_dev, 1);
+    notify_fibonacci_type_callback(NULL);
 }
 
 module_init(init_fib_dev);
