@@ -29,7 +29,7 @@ unload:
 	sudo rmmod fibkm.ko || true >/dev/null
 
 client: client.c fib.c
-	$(CC) -o $@ $^ -Wall -Werror -O3 -g -lgmp
+	$(CC) -o $@ $^ -Wall -Werror -lgmp
 
 PRINTF = env printf
 PASS_COLOR = \e[32;01m
@@ -40,7 +40,7 @@ check: all
 	@mkdir -p logs
 	$(MAKE) unload
 	$(MAKE) load
-	sudo taskset 0x1 ./client > out
+	sudo ./client > out
 	$(MAKE) unload
 	@scripts/verify.py && $(call pass)
 
